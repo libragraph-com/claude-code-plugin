@@ -1,0 +1,8 @@
+{
+  "name": "libragraph",
+  "description": "LibRAGraph personal knowledge vault — search, browse, read, and organize content through AI-powered tools. Connect your vault to access files, entities, notes, and media via natural language queries.",
+  "author": {
+    "name": "LibRAGraph"
+  },
+  "homepage": "https://libragraph.com"
+}
