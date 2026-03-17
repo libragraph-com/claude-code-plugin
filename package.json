@@ -1,0 +1,18 @@
+{
+  "name": "@libragraph/mcp",
+  "version": "0.1.0",
+  "description": "LibRAGraph MCP server — connect Claude to your vault",
+  "type": "module",
+  "bin": {
+    "libragraph-mcp": "./bin/libragraph-mcp.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": ["mcp", "claude", "libragraph", "vault", "knowledge-management"],
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/libragraph-com/claude-code-plugin"
+  }
+}
