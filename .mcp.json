@@ -1,6 +1,6 @@
 {
   "libragraph": {
     "type": "http",
-    "url": "https://mcp.libragraph.com/mcp"
+    "url": "https://mcp.libragraph.com"
   }
 }
