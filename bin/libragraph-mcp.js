@@ -11,14 +11,21 @@
  * Environment variables:
  *   LIBRAGRAPH_URL    — vault MCP endpoint (default: http://localhost:8080/mcp)
  *   LIBRAGRAPH_TOKEN  — PAT token (lvt_...)
- *
- * Usage:
- *   LIBRAGRAPH_TOKEN=lvt_abc123 libragraph-mcp
- *   LIBRAGRAPH_URL=https://kevin.gw.libragraph.com/mcp LIBRAGRAPH_TOKEN=lvt_abc123 libragraph-mcp
+ *   LIBRAGRAPH_DEBUG  — set to "1" to log to /tmp/libragraph-mcp.log
  */
+
+import { appendFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
 
 const url = process.env.LIBRAGRAPH_URL || 'http://localhost:8080/mcp';
 const token = process.env.LIBRAGRAPH_TOKEN;
+const debug = process.env.LIBRAGRAPH_DEBUG === '1';
+
+function log(msg) {
+  if (debug) {
+    appendFileSync('/tmp/libragraph-mcp.log', new Date().toISOString() + ' ' + msg + '\n');
+  }
+}
 
 if (!token) {
   process.stderr.write('Error: LIBRAGRAPH_TOKEN environment variable is required.\n');
@@ -27,25 +34,51 @@ if (!token) {
 }
 
 let sessionId = null;
-let pending = 0;
-let stdinEnded = false;
+
+/**
+ * Sanitize MCP responses to fix Quarkus-generated quirks:
+ * - Remove null values from tool annotations (title: null)
+ * - Remove empty required arrays (required: [])
+ */
+function sanitizeResponse(body, method) {
+  if (method !== 'tools/list') return body;
+  try {
+    const parsed = JSON.parse(body);
+    const tools = parsed?.result?.tools;
+    if (!Array.isArray(tools)) return body;
+    for (const tool of tools) {
+      // Strip null annotation values
+      if (tool.annotations) {
+        for (const [k, v] of Object.entries(tool.annotations)) {
+          if (v === null) delete tool.annotations[k];
+        }
+        if (Object.keys(tool.annotations).length === 0) delete tool.annotations;
+      }
+      // Strip empty required arrays
+      const schema = tool.inputSchema;
+      if (schema && Array.isArray(schema.required) && schema.required.length === 0) {
+        delete schema.required;
+      }
+    }
+    return JSON.stringify(parsed);
+  } catch {
+    return body;
+  }
+}
 
 async function processStdin() {
-  const readline = await import('node:readline');
-  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
   for await (const line of rl) {
     const trimmed = line.trim();
     if (trimmed.length > 0) {
-      pending++;
-      handleMessage(trimmed).finally(() => {
-        pending--;
-        if (stdinEnded && pending === 0) process.exit(0);
-      });
+      // Process messages sequentially — MCP requires initialize response
+      // before notifications/initialized, and session ID must be captured
+      // before subsequent requests use it.
+      await handleMessage(trimmed);
     }
   }
-  stdinEnded = true;
-  if (pending === 0) process.exit(0);
+  process.exit(0);
 }
 
 processStdin();
@@ -55,9 +88,12 @@ async function handleMessage(line) {
   try {
     request = JSON.parse(line);
   } catch {
-    // Not valid JSON — ignore
     return;
   }
+
+  const method = request.method || 'response';
+  const id = request.id;
+  log(`→ ${method} id=${id ?? 'notification'}`);
 
   try {
     const headers = {
@@ -83,34 +119,47 @@ async function handleMessage(line) {
 
     const contentType = resp.headers.get('Content-Type') || '';
 
+    // Notifications (no id) should not produce stdout output —
+    // the server may return errors for unknown notifications, but
+    // forwarding id:null errors breaks Claude Code's JSON-RPC parser.
+    const isNotification = id === undefined || id === null;
+
     if (contentType.includes('text/event-stream')) {
-      // SSE response — parse events and forward JSON-RPC messages
       const text = await resp.text();
-      for (const line of text.split('\n')) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6).trim();
-          if (data.length > 0) {
-            process.stdout.write(data + '\n');
+      log(`← SSE status=${resp.status} len=${text.length}`);
+      if (!isNotification) {
+        for (const sseLine of text.split('\n')) {
+          if (sseLine.startsWith('data: ')) {
+            const data = sseLine.slice(6).trim();
+            if (data.length > 0) {
+              process.stdout.write(data + '\n');
+            }
           }
         }
       }
     } else {
-      // Regular JSON response
       const body = await resp.text();
-      if (body.length > 0) {
-        process.stdout.write(body + '\n');
+      log(`← JSON status=${resp.status} len=${body.length}`);
+      if (body.length > 0 && !isNotification) {
+        // Clean up tools/list response — Quarkus MCP generates null annotation
+        // fields and empty required arrays that can break some MCP clients
+        const output = sanitizeResponse(body, method);
+        process.stdout.write(output + '\n');
       }
     }
   } catch (err) {
-    // Network error — return JSON-RPC error
-    const errorResponse = {
-      jsonrpc: '2.0',
-      id: request.id ?? null,
-      error: {
-        code: -32000,
-        message: `Vault connection failed: ${err.message}`,
-      },
-    };
-    process.stdout.write(JSON.stringify(errorResponse) + '\n');
+    log(`← ERROR: ${err.message}`);
+    // Only send error response for requests (with id), not notifications
+    if (id !== undefined) {
+      const errorResponse = {
+        jsonrpc: '2.0',
+        id: id,
+        error: {
+          code: -32000,
+          message: `Vault connection failed: ${err.message}`,
+        },
+      };
+      process.stdout.write(JSON.stringify(errorResponse) + '\n');
+    }
   }
 }
